@@ -25,6 +25,39 @@ def load_config(config_path: str) -> dict:
     return config
 
 
+def setup_wandb(config: dict):
+    """Initialize Weights & Biases if configured."""
+    if 'wandb' in config and 'wandb' in config['logging'].get('report_to', []):
+        try:
+            import wandb
+
+            # Initialize wandb with config
+            wandb_config = config.get('wandb', {})
+
+            wandb.init(
+                project=wandb_config.get('project', 'bert-pretraining'),
+                entity=wandb_config.get('entity'),
+                name=wandb_config.get('name'),
+                tags=wandb_config.get('tags', []),
+                notes=wandb_config.get('notes'),
+                config={
+                    'model': config['model'],
+                    'training': config['training'],
+                    'dataset': config['dataset'],
+                }
+            )
+
+            print(f"✓ Weights & Biases initialized: {wandb.run.name}")
+            print(f"  View run at: {wandb.run.url}")
+
+        except ImportError:
+            print("Warning: wandb not installed. Install with: pip install wandb")
+            print("Continuing without W&B logging...")
+        except Exception as e:
+            print(f"Warning: Could not initialize W&B: {e}")
+            print("Continuing without W&B logging...")
+
+
 def setup_model_and_tokenizer(model_name: str):
     """Initialize BERT model and tokenizer."""
     print(f"Loading model and tokenizer: {model_name}")
@@ -40,18 +73,54 @@ def main():
     parser = argparse.ArgumentParser(
         description="Pretrain BERT with MLM and NSP objectives"
     )
-    parser.add_argument("--config", type=str, required=True, help="Path to configuration YAML file")
-    parser.add_argument("--data", type=str, required=True, help="Path to training data (JSONL format)")
-    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint to resume training from")
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to configuration YAML file"
+    )
+    parser.add_argument(
+        "--data",
+        type=str,
+        required=True,
+        help="Path to training data (JSONL format)"
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume training from"
+    )
+    parser.add_argument(
+        "--wandb_run_name",
+        type=str,
+        default=None,
+        help="Custom name for W&B run"
+    )
+
     args = parser.parse_args()
 
+    # Load configuration
     config = load_config(args.config)
+
+    # Override W&B run name if provided
+    if args.wandb_run_name and 'wandb' in config:
+        config['wandb']['name'] = args.wandb_run_name
+
+    # Set seed for reproducibility
     set_seed(config['training']['seed'])
+
+    # Initialize Weights & Biases
+    setup_wandb(config)
+
+    # Create output directories
     os.makedirs(config['training']['output_dir'], exist_ok=True)
     os.makedirs(config['logging']['logging_dir'], exist_ok=True)
 
+    # Initialize model and tokenizer
     model, tokenizer = setup_model_and_tokenizer(config['model']['name'])
 
+    # Create datasets using the helper function
     print(f"Loading dataset from: {args.data}")
     train_dataset, eval_dataset = create_train_val_datasets(
         data_path=args.data,
@@ -61,11 +130,13 @@ def main():
         seed=config['training']['seed'],
     )
 
+    # Create data collator for MLM
     data_collator = DataCollatorForBERTPretraining(
         tokenizer=tokenizer,
         mlm_probability=config['model']['mlm_probability'],
     )
 
+    # Setup training arguments
     training_args = TrainingArguments(
         output_dir=config['training']['output_dir'],
         overwrite_output_dir=True,
@@ -91,8 +162,12 @@ def main():
         seed=config['training']['seed'],
         dataloader_pin_memory=True,
         remove_unused_columns=False,
+        logging_first_step=True,
+        logging_nan_inf_filter=True,
+        disable_tqdm=False,  # Enable progress bars
     )
 
+    # Initialize custom trainer
     trainer = BERTPreTrainer(
         model=model,
         args=training_args,
@@ -100,16 +175,32 @@ def main():
         eval_dataset=eval_dataset,
         data_collator=data_collator,
         tokenizer=tokenizer,
+        callbacks=[WandbMetricsCallback()] if 'wandb' in config['logging'].get('report_to', []) else [],
     )
 
+    # Train
+    print("\n" + "="*80)
     print("Starting training...")
+    print("="*80 + "\n")
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
-    print(f"Saving final model to {config['training']['output_dir']}")
+    # Save final model
+    print(f"\nSaving final model to {config['training']['output_dir']}")
     trainer.save_model(config['training']['output_dir'])
     tokenizer.save_pretrained(config['training']['output_dir'])
 
+    # Finish W&B run
+    if 'wandb' in config['logging'].get('report_to', []):
+        try:
+            import wandb
+            wandb.finish()
+            print("✓ W&B run completed")
+        except:
+            pass
+
+    print("\n" + "="*80)
     print("Training complete!")
+    print("="*80)
 
 
 if __name__ == "__main__":

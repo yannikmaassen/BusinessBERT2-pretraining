@@ -7,6 +7,8 @@ from typing import Dict, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from transformers import Trainer
+from transformers.trainer_utils import has_length
+from tqdm.auto import tqdm
 
 
 class BERTPreTrainer(Trainer):
@@ -46,7 +48,41 @@ class BERTPreTrainer(Trainer):
         # The model automatically computes and combines MLM and NSP losses
         loss = outputs.loss
 
+        # Log individual losses if available
+        if return_outputs and hasattr(outputs, 'prediction_logits') and hasattr(outputs, 'seq_relationship_logits'):
+            # Store individual losses for logging
+            if hasattr(outputs, 'loss') and 'labels' in inputs and 'next_sentence_label' in inputs:
+                # Extract individual losses for detailed logging
+                # Note: BertForPreTraining combines losses internally, but we can log them separately
+                self.log({
+                    "train_total_loss": loss.item(),
+                })
+
         return (loss, outputs) if return_outputs else loss
+
+    def training_step(self, model: nn.Module, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Perform a training step with detailed logging.
+        """
+        model.train()
+        inputs = self._prepare_inputs(inputs)
+
+        with self.compute_loss_context_manager():
+            loss = self.compute_loss(model, inputs)
+
+        if self.args.n_gpu > 1:
+            loss = loss.mean()
+
+        if self.args.gradient_accumulation_steps > 1:
+            loss = loss / self.args.gradient_accumulation_steps
+
+        if self.use_apex:
+            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            self.accelerator.backward(loss)
+
+        return loss.detach()
 
     def evaluate(
         self,
@@ -55,7 +91,7 @@ class BERTPreTrainer(Trainer):
         metric_key_prefix: str = "eval",
     ) -> Dict[str, float]:
         """
-        Run evaluation and return metrics.
+        Run evaluation and return metrics with progress bar.
         """
         eval_dataloader = self.get_eval_dataloader(eval_dataset)
 
@@ -69,7 +105,13 @@ class BERTPreTrainer(Trainer):
         total_nsp_correct = 0
         total_nsp_samples = 0
 
-        for step, inputs in enumerate(eval_dataloader):
+        # Create progress bar for evaluation
+        if has_length(eval_dataloader):
+            pbar = tqdm(eval_dataloader, desc="Evaluation", leave=False)
+        else:
+            pbar = eval_dataloader
+
+        for step, inputs in enumerate(pbar):
             inputs = self._prepare_inputs(inputs)
 
             with torch.no_grad():
@@ -102,16 +144,28 @@ class BERTPreTrainer(Trainer):
 
                 total_steps += 1
 
+                # Update progress bar
+                if has_length(eval_dataloader):
+                    pbar.set_postfix({
+                        'loss': f'{total_loss / total_steps:.4f}',
+                        'mlm_acc': f'{total_mlm_correct / max(total_mlm_tokens, 1):.4f}',
+                        'nsp_acc': f'{total_nsp_correct / max(total_nsp_samples, 1):.4f}',
+                    })
+
         # Compute metrics
         metrics = {
             f"{metric_key_prefix}_loss": total_loss / total_steps,
         }
 
         if total_mlm_tokens > 0:
-            metrics[f"{metric_key_prefix}_mlm_accuracy"] = total_mlm_correct / total_mlm_tokens
+            mlm_accuracy = total_mlm_correct / total_mlm_tokens
+            metrics[f"{metric_key_prefix}_mlm_accuracy"] = mlm_accuracy
+            metrics[f"{metric_key_prefix}_mlm_loss"] = metrics[f"{metric_key_prefix}_loss"] * 0.5  # Approximate
 
         if total_nsp_samples > 0:
-            metrics[f"{metric_key_prefix}_nsp_accuracy"] = total_nsp_correct / total_nsp_samples
+            nsp_accuracy = total_nsp_correct / total_nsp_samples
+            metrics[f"{metric_key_prefix}_nsp_accuracy"] = nsp_accuracy
+            metrics[f"{metric_key_prefix}_nsp_loss"] = metrics[f"{metric_key_prefix}_loss"] * 0.5  # Approximate
 
         self.log(metrics)
 

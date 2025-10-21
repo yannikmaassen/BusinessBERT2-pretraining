@@ -26,14 +26,22 @@ training:
 
 # Dataset configuration
 dataset:
-  train_split: 0.9
-  validation_split: 0.1
+  train_split: 0.95
+  validation_split: 0.05
   nsp_probability: 0.5
   short_seq_probability: 0.1
   max_sentences_per_doc: 100
 
 # Logging
 logging:
-  report_to: ["tensorboard"]
+  report_to: ["wandb", "tensorboard"]
   logging_dir: "./logs"
 
+# Weights & Biases configuration
+wandb:
+  project: "businessbert-pretraining"
+  entity: null  # Set to your W&B username/team or leave null for default
+  name: null  # Run name - will auto-generate if null
+  tags: ["bert", "pretraining", "mlm", "nsp"]
+  notes: "BERT pretraining with MLM and NSP objectives on business documents"
+  log_model: "checkpoint"  # Options: false, "checkpoint", "end"
