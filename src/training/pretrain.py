@@ -16,6 +16,7 @@ from transformers import (
 from src.data.dataset import create_train_val_datasets
 from src.data.collator import DataCollatorForBERTPretraining
 from src.training.trainer import BERTPreTrainer
+from src.training.callbacks import WandbMetricsCallback
 
 
 def load_config(config_path: str) -> dict:
